@@ -444,6 +444,9 @@ print_status(struct fscd_cfg *config, int sock_fd)
 	char *statstream;
 	char errorstr[LINE_MAX];
 	char eot = 4;
+	char status = 0;
+
+	send(sock_fd, &status, 1, 0);
 
 	/* Our own pid. */
 	if (asprintf(&statstream, "The fscd pid is %d.\n", getpid()) <= 0) {
@@ -1044,6 +1047,7 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
 	char *sendstr;
 	struct service *svs;
 	char eot = 4;
+	char status =0;
 
 	for (iter = arglst; (*iter = strsep(&serviceline, ":")) != NULL;) {
 		if (**iter != '\0')
@@ -1057,17 +1061,24 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
 	if (strcmp(arglst[0], "enable") == 0) {
 		if (service_registered(config, arglst[1])) {
 			asprintf(&sendstr, "Service already registered.\n");
+			status = 1;
 		} else {
 			svs = make_service(arglst[1]);
-			if (!svs)
+			if (!svs) {
 				asprintf(&sendstr, "Error building process structure.\n");
-			else if (!service_running(svs->svname) && start_service(svs))
+				status = 1;
+			} else if (!service_running(svs->svname) && start_service(svs)) {
 				asprintf(&sendstr, "Could not start service.\n");
-			else if (register_service(config, svs))
+				status = 1;
+			} else if (register_service(config, svs)) {
 				asprintf(&sendstr, "Could not monitor service.\n");
-			else
+				status = 1;
+			} else {
 				asprintf(&sendstr, "Monitoring service.\n");
+				status = 0;
+			}
 		}
+		send(sock_fd, &status, 1, 0);
 		send(sock_fd, sendstr, strlen(sendstr), 0);
 		send(sock_fd, &eot, 1, 0);
 		free(sendstr);
@@ -1076,10 +1087,14 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
 
 	/* disable */
 	} else if (strcmp(arglst[0], "disable") == 0) {
-		if (unregister_service(config, arglst[1]))
+		if (unregister_service(config, arglst[1])) {
 			asprintf(&sendstr, "Removing service failed: Not found.\n");
-		else
+			status = 1;
+		} else {
 			asprintf(&sendstr, "Service removed.\n");
+			status = 0;
+		}
+		send(sock_fd, &status, 1, 0);
 		send(sock_fd, sendstr, strlen(sendstr), 0);
 		send(sock_fd, &eot, 1, 0);
 		free(sendstr);
@@ -1089,6 +1104,8 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
 	/* shutdown */
 	} else if (strcmp(arglst[0], "shutdown") == 0) {
 		asprintf(&sendstr, "fscd shutting down.\n");
+		status = 0;
+		send(sock_fd, &status, 1, 0);
 		send(sock_fd, sendstr, strlen(sendstr), 0);
 		send(sock_fd, &eot, 1, 0);
 		free(sendstr);
