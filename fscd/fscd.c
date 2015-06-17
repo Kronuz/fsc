@@ -301,7 +301,7 @@ handle_queue(struct fscd_cfg *config, struct kevent *kq_events)
 }
 
 /*
- * Determine the status of the exited process. If it is a signal which is likely 
+ * Determine the status of the exited process. If it is a signal which is likely
  * to be user-issued, return 0, 1 otherwise.
  */
 static int
@@ -418,13 +418,13 @@ while I was waiting for it to restart.", inputv->sname);
 		}
 		sleep(10);
 	}
-	printlog(LOG_ERR, "Service %s was not restarted. Doing it myself.", 
+	printlog(LOG_ERR, "Service %s was not restarted. Doing it myself.",
 	    inputv->sname);
 	pthread_mutex_lock(&inputv->config->service_mtx);
 	handle_restart(inputv->config, inputv->sname);
 	pthread_mutex_unlock(&inputv->config->service_mtx);
 	return NULL;
-	
+
 	printlog(LOG_ERR, "Service %s should be waited for, but was not found.",
 	    inputv->sname);
 	return NULL;
@@ -1103,7 +1103,7 @@ fscd_shutdown(struct fscd_cfg *config, int exitcode)
 
 /*
  * Handle a signal.
- * XXX: Currently, there's no signal handling except for shutting down on the 
+ * XXX: Currently, there's no signal handling except for shutting down on the
  * registered signals. There might be some in the future.
  */
 static void
