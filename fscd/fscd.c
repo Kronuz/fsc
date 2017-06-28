@@ -71,8 +71,6 @@ __FBSDID("$FreeBSD$");
 #include <util.h>
 #endif
 
-#define DEBUGPRINT(...) if (debug) printlog(LOG_ERR, __VA_ARGS__);
-
 /* Portability to pkgsrc. */
 #ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc/"
@@ -108,11 +106,15 @@ struct fscd_cfg {
 	int kq;
 };
 
+struct restart_params {
+	struct fscd_cfg *config;
+	char *sname;
+};
+
 #if defined(__FreeBSD__)
 	static struct pidfh *pfh = NULL;
 #endif
 
-static int debug = 0;
 static char *socketname = NULL;
 static char *conffile = NULL;
 
@@ -149,6 +151,7 @@ main(int argc, char *argv[])
 	struct kevent kq_events;
 	struct stat nb_stat;
 	char errorstr[LINE_MAX];
+	int verbosity = 0;
 
 	/* check arguments */
 	while ((ch = getopt(argc, argv, "Vdvfs:c:")) != -1)
@@ -160,8 +163,8 @@ main(int argc, char *argv[])
 				if (asprintf(&conffile, "%s", optarg) <= 0)
 					err(1, "asprintf");
 				break;
-			case 'v': /* Debugging mode. */
-				debug = 1;
+			case 'v': /* Verbosity. */
+				++verbosity;
 				break;
 			case 'f': /* Force overwrite. */
 				force = 1;
@@ -176,6 +179,18 @@ main(int argc, char *argv[])
 		}
 	argc -= optind;
 	argv += optind;
+
+	switch (verbosity) {
+		case 0:
+			setlogmask(LOG_UPTO(LOG_NOTICE));
+			break;
+		case 1:
+			setlogmask(LOG_UPTO(LOG_INFO));
+			break;
+		default:
+			setlogmask(LOG_UPTO(LOG_DEBUG));
+			break;
+	}
 
 	/* initialize values */
 	if (!socketname && asprintf(&socketname, "%s", SOCK_PATH) <= 0)
@@ -194,14 +209,7 @@ main(int argc, char *argv[])
 #if defined(__FreeBSD__)
 	if ((pfh = pidfile_open(NULL, 0644, NULL)) == NULL)
 		err(1, "pidfile_open");
-#endif
-/*
-	if (debug)
-		printf("Debug mode. Not daemonizing.\n");
-	else if (daemon(0, 0) == -1)
-		err(1, "daemon");
-*/
-#if defined(__FreeBSD__)
+
 	if (pidfile_write(pfh) == -1)
 		err(1, "pidfile_write");
 #else
@@ -229,11 +237,15 @@ main(int argc, char *argv[])
 	signal(SIGUSR1, handle_sig);
 	signal(SIGUSR2, handle_sig);
 
+	printlog(LOG_NOTICE, "Starting.");
+
 	monthrint = pthread_create(&(config.service_thr), NULL,
 	    connect_monitor, &config);
 
 	/* Read configuration */
 	readconf(&config);
+
+	printlog(LOG_INFO, "Monitoring processes...");
 
 	while (1) {
 		newevent = kevent(config.kq, NULL, 0, &kq_events, 1, NULL);
@@ -281,9 +293,9 @@ handle_queue(struct fscd_cfg *config, struct kevent *kq_events)
 
 				if (pretcode == 1 && handle_restart(config, svs->svname) == 0) {
 					printlog(LOG_ERR, "%s was restarted",
-					    svs->svname);
+						svs->svname);
 				} else if (pretcode == 0 && handle_waiting(config, svs->svname) == 0) {
-					printlog(LOG_ERR, "Waiting for %s to restart.", svs->svname);
+					printlog(LOG_ERR, "%s waiting for restart.", svs->svname);
 				} else {
 					printlog(LOG_ERR, "%s failed to restart.",
 							svs->svname);
@@ -351,10 +363,11 @@ handle_restart(struct fscd_cfg *config, char *sname)
 			printlog(LOG_ERR, "Could not monitor service.");
 			return -1;
 		}
-		break;
+
+		return 0;
 	}
 
-	return 0;
+	return -1;
 }
 
 /*
@@ -364,14 +377,12 @@ static int
 handle_waiting(struct fscd_cfg *config, char *sname)
 {
 	pthread_t tmpthr;
-	struct  {
-		struct fscd_cfg *cfg;
-		char *name;
-	} tmpv;
+	struct restart_params *inputv;
 
-	tmpv.cfg = config;
-	tmpv.name = sname;
-	return pthread_create(&tmpthr, NULL, wait_restart, &tmpv);
+	inputv = malloc(sizeof(struct restart_params));
+	inputv->config = config;
+	inputv->sname = strdup(sname);
+	return pthread_create(&tmpthr, NULL, wait_restart, inputv);
 }
 
 /*
@@ -380,10 +391,7 @@ handle_waiting(struct fscd_cfg *config, char *sname)
 static void *
 wait_restart(void *var)
 {
-	struct {
-		struct fscd_cfg *config;
-		char *sname;
-	} *inputv;
+	struct restart_params *inputv;
 	struct service *svs;
 	struct spid *svpid;
 	int retries;
@@ -409,6 +417,8 @@ wait_restart(void *var)
 					printlog(LOG_INFO, "Service %s was restarted, but not by me.",
 							svs->svname);
 				pthread_mutex_unlock(&inputv->config->service_mtx);
+				free(inputv->sname);
+				free(inputv);
 				return NULL;
 			}
 			pthread_mutex_unlock(&inputv->config->service_mtx);
@@ -417,19 +427,28 @@ wait_restart(void *var)
 		if (!svs) {
 			printlog(LOG_ERR, "Service %s was removed from monitoring \
 while I was waiting for it to restart.", inputv->sname);
+			free(inputv->sname);
+			free(inputv);
 			return NULL;
 		}
 		sleep(10);
 	}
 	printlog(LOG_ERR, "Service %s was not restarted. Doing it myself.",
-	    inputv->sname);
+	    svs->svname);
 	pthread_mutex_lock(&inputv->config->service_mtx);
-	handle_restart(inputv->config, inputv->sname);
+	if (handle_restart(inputv->config, svs->svname) == 0) {
+		printlog(LOG_ERR, "%s was restarted",
+			svs->svname);
+	} else {
+		printlog(LOG_ERR, "%s failed to restart.",
+				svs->svname);
+		printlog(LOG_ERR, "%s removed from monitoring.",
+				svs->svname);
+		unregister_service(inputv->config, svs->svname);
+	}
 	pthread_mutex_unlock(&inputv->config->service_mtx);
-	return NULL;
-
-	printlog(LOG_ERR, "Service %s should be waited for, but was not found.",
-	    inputv->sname);
+	free(inputv->sname);
+	free(inputv);
 	return NULL;
 }
 
@@ -541,12 +560,7 @@ printlog(int priority, const char *logstr, ...)
 
 	va_start(tmplist, logstr);
 
-	if (debug) {
-		vfprintf(stdout, logstr, tmplist);
-		fprintf(stdout, "\n");
-	} else {
-		vsyslog(priority, logstr, tmplist);
-	}
+	vsyslog(priority, logstr, tmplist);
 
 	va_end(tmplist);
 	return;
@@ -802,16 +816,8 @@ kqueue_service(struct fscd_cfg *config, struct service *svs)
 static int
 register_service(struct fscd_cfg *config, struct service *svs)
 {
-	int ret;
-	char errorstr[LINE_MAX];
-
-	if (SLIST_EMPTY(&svs->svpids) && (ret=fill_pids(svs))) {
-		if (strerror_r(errno, errorstr, sizeof errorstr))
-			printlog(LOG_ERR, "Getting pids failed");
-		else
-			printlog(LOG_ERR, "Getting pids failed: %s", errorstr);
-		return ret;
-	}
+	if (SLIST_EMPTY(&svs->svpids))
+		fill_pids(svs);
 
 	if (kqueue_service(config, svs))
 		return -1;
@@ -841,6 +847,7 @@ unregister_service(struct fscd_cfg *config, char *svc_name_in)
 				free(svpid);
 			}
 			printlog(LOG_INFO, "%s has been removed.", svs->svname);
+			free(svs->svname);
 			free(svs);
 			ret = 0;
 			break;
@@ -892,7 +899,10 @@ readconf(struct fscd_cfg *config)
 						printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
 					else
 						printlog(LOG_ERR, "%s could not be monitored. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
+					free(svs->svname);
 					free(svs);
+				} else {
+					printlog(LOG_INFO, "%s is being monitored.", svs->svname);
 				}
 			}
 		} else {
@@ -906,20 +916,21 @@ readconf(struct fscd_cfg *config)
 				if (!svs) {
 					printlog(LOG_ERR, "%s could not be built a structure for.", svs->svname);
 					ret = -1;
-				} else if ((ret=start_service(svs))) {
-					if (ret < 0)
-						printlog(LOG_ERR, "%s could not be started.", svs->svname);
-					else
-						printlog(LOG_ERR, "%s could not be started. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
-					free(svs);
 				} else if ((ret=register_service(config, svs))) {
 					if (ret < 0)
 						printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
 					else
 						printlog(LOG_ERR, "%s could not be monitored. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
+					free(svs->svname);
 					free(svs);
+				} else if ((ret=handle_waiting(config, svs->svname))) {
+					printlog(LOG_ERR, "%s failed to wait for start.",
+							svs->svname);
+					printlog(LOG_ERR, "%s removed from monitoring.",
+							svs->svname);
+					unregister_service(config, svs->svname);
 				} else {
-					printlog(LOG_INFO, "%s started from config file.", svs->svname);
+					printlog(LOG_INFO, "Waiting for %s to start.", svs->svname);
 				}
 			}
 		}
@@ -943,6 +954,8 @@ connect_monitor(void *var)
 	struct fscd_cfg *config;
 	char taskstr[LINE_MAX];
 	char errorstr[LINE_MAX];
+
+	printlog(LOG_INFO, "Server thread started.");
 
 	config = var;
 	memset(&local, 0, sizeof(local));
