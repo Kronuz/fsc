@@ -1,0 +1,812 @@
+# This is a shell archive.  Save it in a file, remove anything before
+# this line, and then unpack it by entering "sh file".  Note, it may
+# create directories; files and directories will be owned by you and
+# have default permissions.
+#
+# This archive contains:
+#
+#	fsc
+#	fsc/distinfo
+#	fsc/files
+#	fsc/files/patch-fscadm__fscadm.c
+#	fsc/files/patch-fscd__fscd.c
+#	fsc/files/patch-rc.d_fscd
+#	fsc/Makefile
+#	fsc/pkg-descr
+#
+echo c - fsc
+mkdir -p fsc > /dev/null 2>&1
+echo x - fsc/distinfo
+sed 's/^X//' >fsc/distinfo << 'END-of-fsc/distinfo'
+XSHA256 (fsc-1.0.1.tar.gz) = 41979af3f5ed2fd37e30839cacc22408ac65f2fd20df30de1e5114bc0d2e733b
+XSIZE (fsc-1.0.1.tar.gz) = 12435
+END-of-fsc/distinfo
+echo c - fsc/files
+mkdir -p fsc/files > /dev/null 2>&1
+echo x - fsc/files/patch-fscadm__fscadm.c
+sed 's/^X//' >fsc/files/patch-fscadm__fscadm.c << 'END-of-fsc/files/patch-fscadm__fscadm.c'
+Xdiff --git a/fscadm/fscadm.c b/fscadm/fscadm.c
+Xindex 53076f5..d91ed27 100644
+X--- fscadm/fscadm.c
+X+++ fscadm/fscadm.c
+X@@ -97,7 +97,7 @@ main(int argc, char *argv[])
+X 		usage();
+X 
+X 	/* shutdown, status */
+X-	if ((strcmp(argv[0], "shutdown") == 0) 
+X+	if ((strcmp(argv[0], "shutdown") == 0)
+X 			|| (strcmp(argv[0], "status") == 0)) {
+X 		if (argc != 1)
+X 			usage();
+X@@ -137,7 +137,7 @@ usage(void)
+X 			"\n"
+X 			"options:\n"
+X 			"        -V   Print out version.\n"
+X-			"        -s S Use socket S instead of standard.\n " );
+X+			"        -s S Use socket S instead of standard.\n" );
+X 	exit(EX_USAGE);
+X }
+X 
+X@@ -158,9 +158,10 @@ version(void)
+X int
+X daemonconnect(char *task)
+X {
+X-	int s, len, nbytes, retcode = 0;
+X+	int s, len, nbytes, retcode = 1, total = 0;
+X 	struct sockaddr_un remote;
+X 	char recdata[LINE_MAX];
+X+	char *ptr;
+X 
+X 	if ((s = socket(PF_LOCAL, SOCK_STREAM, 0)) == -1)
+X 		err(EX_OSERR, "socket");
+X@@ -176,16 +177,22 @@ daemonconnect(char *task)
+X 		err(EX_OSERR, "send");
+X 
+X 	do {
+X-		memset(recdata, 0, sizeof(recdata));
+X 		nbytes = recv(s, recdata, sizeof(recdata) - 1, 0);
+X-		if (nbytes > 0)
+X-			printf("%s", recdata);
+X-	} while (recdata[strlen(recdata) - 1] != 4); /* 4 = EOT */
+X-
+X-	if (nbytes < 0) {
+X-		warn("recv");
+X-		retcode = nbytes;
+X-	}
+X+		if (nbytes <= 0) {
+X+			if (nbytes < 0) {
+X+				warn("recv");
+X+			}
+X+			break;
+X+		}
+X+		ptr = recdata;
+X+		if (!total) {
+X+			retcode = recdata[0];
+X+			ptr++;
+X+		}
+X+		total += nbytes;
+X+		recdata[nbytes] = '\0';
+X+		printf("%s", ptr);
+X+	} while (recdata[nbytes - 1] != 4); /* 4 = EOT */
+X 
+X 	close(s);
+X 	return retcode;
+END-of-fsc/files/patch-fscadm__fscadm.c
+echo x - fsc/files/patch-fscd__fscd.c
+sed 's/^X//' >fsc/files/patch-fscd__fscd.c << 'END-of-fsc/files/patch-fscd__fscd.c'
+Xdiff --git a/fscd/fscd.c b/fscd/fscd.c
+Xindex 2c915ce..fb0f389 100644
+X--- fscd/fscd.c
+X+++ fscd/fscd.c
+X@@ -71,8 +71,6 @@ __FBSDID("$FreeBSD$");
+X #include <util.h>
+X #endif
+X 
+X-#define DEBUGPRINT(...) if (debug) printlog(LOG_ERR, __VA_ARGS__);
+X-
+X /* Portability to pkgsrc. */
+X #ifndef SYSCONFDIR
+X #define SYSCONFDIR "/etc/"
+X@@ -82,8 +80,7 @@ __FBSDID("$FreeBSD$");
+X #define CONF_FILE SYSCONFDIR"fscd.conf"
+X #define SERVICE "service"
+X #define STATUS "onestatus"
+X-#define START "onestart"
+X-#define RESTART "onerestart" // restart is more reliable than just start.
+X+#define START "restart" // restart is more reliable than just start.
+X #define VERSION "1.1"
+X 
+X struct spid {
+X@@ -109,7 +106,15 @@ struct fscd_cfg {
+X 	int kq;
+X };
+X 
+X-static int debug = 0;
+X+struct restart_params {
+X+	struct fscd_cfg *config;
+X+	char *sname;
+X+};
+X+
+X+#if defined(__FreeBSD__)
+X+	static struct pidfh *pfh = NULL;
+X+#endif
+X+
+X static char *socketname = NULL;
+X static char *conffile = NULL;
+X 
+X@@ -146,10 +151,7 @@ main(int argc, char *argv[])
+X 	struct kevent kq_events;
+X 	struct stat nb_stat;
+X 	char errorstr[LINE_MAX];
+X-
+X-#if defined(__FreeBSD__)
+X-	struct pidfh *pfh;
+X-#endif
+X+	int verbosity = 0;
+X 
+X 	/* check arguments */
+X 	while ((ch = getopt(argc, argv, "Vdvfs:c:")) != -1)
+X@@ -161,8 +163,8 @@ main(int argc, char *argv[])
+X 				if (asprintf(&conffile, "%s", optarg) <= 0)
+X 					err(1, "asprintf");
+X 				break;
+X-			case 'v': /* Debugging mode. */
+X-				debug = 1;
+X+			case 'v': /* Verbosity. */
+X+				++verbosity;
+X 				break;
+X 			case 'f': /* Force overwrite. */
+X 				force = 1;
+X@@ -178,6 +180,18 @@ main(int argc, char *argv[])
+X 	argc -= optind;
+X 	argv += optind;
+X 
+X+	switch (verbosity) {
+X+		case 0:
+X+			setlogmask(LOG_UPTO(LOG_NOTICE));
+X+			break;
+X+		case 1:
+X+			setlogmask(LOG_UPTO(LOG_INFO));
+X+			break;
+X+		default:
+X+			setlogmask(LOG_UPTO(LOG_DEBUG));
+X+			break;
+X+	}
+X+
+X 	/* initialize values */
+X 	if (!socketname && asprintf(&socketname, "%s", SOCK_PATH) <= 0)
+X 		err(1, "asprintf");
+X@@ -195,14 +209,7 @@ main(int argc, char *argv[])
+X #if defined(__FreeBSD__)
+X 	if ((pfh = pidfile_open(NULL, 0644, NULL)) == NULL)
+X 		err(1, "pidfile_open");
+X-#endif
+X-/*
+X-	if (debug)
+X-		printf("Debug mode. Not daemonizing.\n");
+X-	else if (daemon(0, 0) == -1)
+X-		err(1, "daemon");
+X-*/
+X-#if defined(__FreeBSD__)
+X+
+X 	if (pidfile_write(pfh) == -1)
+X 		err(1, "pidfile_write");
+X #else
+X@@ -230,12 +237,16 @@ main(int argc, char *argv[])
+X 	signal(SIGUSR1, handle_sig);
+X 	signal(SIGUSR2, handle_sig);
+X 
+X+	printlog(LOG_NOTICE, "Starting.");
+X+
+X 	monthrint = pthread_create(&(config.service_thr), NULL,
+X 	    connect_monitor, &config);
+X 
+X 	/* Read configuration */
+X 	readconf(&config);
+X 
+X+	printlog(LOG_INFO, "Monitoring processes...");
+X+
+X 	while (1) {
+X 		newevent = kevent(config.kq, NULL, 0, &kq_events, 1, NULL);
+X 		if (newevent == 1) {
+X@@ -282,9 +293,9 @@ handle_queue(struct fscd_cfg *config, struct kevent *kq_events)
+X 
+X 				if (pretcode == 1 && handle_restart(config, svs->svname) == 0) {
+X 					printlog(LOG_ERR, "%s was restarted",
+X-					    svs->svname);
+X+						svs->svname);
+X 				} else if (pretcode == 0 && handle_waiting(config, svs->svname) == 0) {
+X-					printlog(LOG_ERR, "Waiting for %s to restart.", svs->svname);
+X+					printlog(LOG_ERR, "%s waiting for restart.", svs->svname);
+X 				} else {
+X 					printlog(LOG_ERR, "%s failed to restart.",
+X 							svs->svname);
+X@@ -301,7 +312,7 @@ handle_queue(struct fscd_cfg *config, struct kevent *kq_events)
+X }
+X 
+X /*
+X- * Determine the status of the exited process. If it is a signal which is likely 
+X+ * Determine the status of the exited process. If it is a signal which is likely
+X  * to be user-issued, return 0, 1 otherwise.
+X  */
+X static int
+X@@ -325,6 +336,7 @@ process_exited(int status, const struct service *svs)
+X static int
+X handle_restart(struct fscd_cfg *config, char *sname)
+X {
+X+	int ret;
+X 	struct service *svs;
+X 	struct spid *svpid;
+X 
+X@@ -338,20 +350,24 @@ handle_restart(struct fscd_cfg *config, char *sname)
+X 			free(svpid);
+X 		}
+X 
+X-		if (start_service(svs)) {
+X-			printlog(LOG_ERR, "Could not restart service.");
+X-			return -1;
+X-		} else if (fill_pids(svs)) {
+X+		if ((ret=start_service(svs))) {
+X+			if (ret < 0)
+X+				printlog(LOG_ERR, "%s could not be restarted.", svs->svname);
+X+			else
+X+				printlog(LOG_ERR, "%s could not be restarted. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
+X+			return ret;
+X+		} else if ((ret=fill_pids(svs))) {
+X 			printlog(LOG_ERR, "Could not get pids for service.");
+X-			return -1;
+X+			return ret;
+X 		} else if (kqueue_service(config, svs)) {
+X 			printlog(LOG_ERR, "Could not monitor service.");
+X 			return -1;
+X 		}
+X-		break;
+X+
+X+		return 0;
+X 	}
+X 
+X-	return 0;
+X+	return -1;
+X }
+X 
+X /*
+X@@ -361,14 +377,12 @@ static int
+X handle_waiting(struct fscd_cfg *config, char *sname)
+X {
+X 	pthread_t tmpthr;
+X-	struct  {
+X-		struct fscd_cfg *cfg;
+X-		char *name;
+X-	} tmpv;
+X-
+X-	tmpv.cfg = config;
+X-	tmpv.name = sname;
+X-	return pthread_create(&tmpthr, NULL, wait_restart, &tmpv);
+X+	struct restart_params *inputv;
+X+
+X+	inputv = malloc(sizeof(struct restart_params));
+X+	inputv->config = config;
+X+	inputv->sname = strdup(sname);
+X+	return pthread_create(&tmpthr, NULL, wait_restart, inputv);
+X }
+X 
+X /*
+X@@ -377,10 +391,7 @@ handle_waiting(struct fscd_cfg *config, char *sname)
+X static void *
+X wait_restart(void *var)
+X {
+X-	struct {
+X-		struct fscd_cfg *config;
+X-		char *sname;
+X-	} *inputv;
+X+	struct restart_params *inputv;
+X 	struct service *svs;
+X 	struct spid *svpid;
+X 	int retries;
+X@@ -399,13 +410,15 @@ wait_restart(void *var)
+X 
+X 			/* Wait for 100 seconds for the service to restart. */
+X 			pthread_mutex_lock(&inputv->config->service_mtx);
+X-			if (fill_pids(svs) == 0) {
+X+			if (!fill_pids(svs)) {
+X 				if (kqueue_service(inputv->config, svs))
+X 					printlog(LOG_ERR, "Could not monitor service.");
+X 				else
+X 					printlog(LOG_INFO, "Service %s was restarted, but not by me.",
+X 							svs->svname);
+X 				pthread_mutex_unlock(&inputv->config->service_mtx);
+X+				free(inputv->sname);
+X+				free(inputv);
+X 				return NULL;
+X 			}
+X 			pthread_mutex_unlock(&inputv->config->service_mtx);
+X@@ -414,19 +427,28 @@ wait_restart(void *var)
+X 		if (!svs) {
+X 			printlog(LOG_ERR, "Service %s was removed from monitoring \
+X while I was waiting for it to restart.", inputv->sname);
+X+			free(inputv->sname);
+X+			free(inputv);
+X 			return NULL;
+X 		}
+X 		sleep(10);
+X 	}
+X-	printlog(LOG_ERR, "Service %s was not restarted. Doing it myself.", 
+X-	    inputv->sname);
+X+	printlog(LOG_ERR, "Service %s was not restarted. Doing it myself.",
+X+	    svs->svname);
+X 	pthread_mutex_lock(&inputv->config->service_mtx);
+X-	handle_restart(inputv->config, inputv->sname);
+X+	if (handle_restart(inputv->config, svs->svname) == 0) {
+X+		printlog(LOG_ERR, "%s was restarted",
+X+			svs->svname);
+X+	} else {
+X+		printlog(LOG_ERR, "%s failed to restart.",
+X+				svs->svname);
+X+		printlog(LOG_ERR, "%s removed from monitoring.",
+X+				svs->svname);
+X+		unregister_service(inputv->config, svs->svname);
+X+	}
+X 	pthread_mutex_unlock(&inputv->config->service_mtx);
+X-	return NULL;
+X-	
+X-	printlog(LOG_ERR, "Service %s should be waited for, but was not found.",
+X-	    inputv->sname);
+X+	free(inputv->sname);
+X+	free(inputv);
+X 	return NULL;
+X }
+X 
+X@@ -441,6 +463,9 @@ print_status(struct fscd_cfg *config, int sock_fd)
+X 	char *statstream;
+X 	char errorstr[LINE_MAX];
+X 	char eot = 4;
+X+	char status = 0;
+X+
+X+	send(sock_fd, &status, 1, 0);
+X 
+X 	/* Our own pid. */
+X 	if (asprintf(&statstream, "The fscd pid is %d.\n", getpid()) <= 0) {
+X@@ -535,12 +560,7 @@ printlog(int priority, const char *logstr, ...)
+X 
+X 	va_start(tmplist, logstr);
+X 
+X-	if (debug) {
+X-		vfprintf(stdout, logstr, tmplist);
+X-		fprintf(stdout, "\n");
+X-	} else {
+X-		vsyslog(priority, logstr, tmplist);
+X-	}
+X+	vsyslog(priority, logstr, tmplist);
+X 
+X 	va_end(tmplist);
+X 	return;
+X@@ -567,10 +587,10 @@ service_running(const char *sname)
+X 
+X 	retcode = system(cmdstr);
+X 	free(cmdstr);
+X-	if (WEXITSTATUS(retcode) == 0)
+X-		return 1;
+X-	else
+X+	if (WEXITSTATUS(retcode))
+X 		return 0;
+X+	else
+X+		return 1;
+X }
+X 
+X /*
+X@@ -639,6 +659,8 @@ fill_pids(struct service *svs)
+X 	char pinput[LINE_MAX];
+X 	char errorstr[LINE_MAX];
+X 	FILE *pp;
+X+	int retcode;
+X+	pid_t pid;
+X 
+X 	/* Empty list. */
+X 	if (!SLIST_EMPTY(&svs->svpids)) {
+X@@ -666,50 +688,40 @@ fill_pids(struct service *svs)
+X 		return -1;
+X 	}
+X 
+X-	if (fgets(pinput, sizeof pinput, pp) == NULL) {
+X-		if (strerror_r(errno, errorstr, sizeof errorstr))
+X-			printlog(LOG_ERR, "fgets failed: %s", svs->svname, errorstr);
+X-		else
+X-			printlog(LOG_ERR, "fgets failed.", svs->svname);
+X-		pclose(pp);
+X-		return -1;
+X+	while (fgets(pinput, sizeof pinput, pp) != NULL) {
+X+		if (strstr(pinput, "_enable to YES in") != NULL) {
+X+			pclose(pp);
+X+			return 1;
+X+		}
+X+
+X+		/* Scan the output for a separated list of numbers assuming they are pids.
+X+		 * We cannot scan for the service's name, as the name might be different
+X+		 * to the service script name.
+X+		 * Though we could assume the service name is properly set in its rc script
+X+		 * and we could thus just parse the script ourselves, exceptions here might
+X+		 * have the same probability as services with different service and script
+X+		 * names.
+X+		 * So we have to skip the first portion up to the "is not running" or "is
+X+		 * runnind as pid" and assume service(8) returns the right script's output.
+X+		 */
+X+		for (pinputp = strtok_r(pinput, " .,\t\n", &ttmpstr);
+X+				pinputp;
+X+				pinputp = strtok_r(NULL, " .,\t\n", &ttmpstr)) {
+X+			pid = strtoul(pinputp, &tmpstr, 10);
+X+			if (tmpstr && tmpstr > pinputp) {
+X+				if (pid > 0 && getsid(pid) != -1) {
+X+					svpid = malloc(sizeof(struct spid));
+X+					svpid->svpid = pid;
+X+					SLIST_INSERT_HEAD(&svs->svpids, svpid, next);
+X+				}
+X+			}
+X+		}
+X 	}
+X-	pclose(pp);
+X-
+X-	/* Scan the output. We want (see /etc/rc.subr):
+X-	 *   ${name} is running as pid $rc_pid.
+X-	 * or
+X-	 *   ${name} is not running.
+X-	 * with $rc_pid being a space-separated list of pids.
+X-	 * We cannot scan for the service's name, as the name might be different
+X-	 * to the service script name.
+X-	 * Though we could assume the service name is properly set in its rc script 
+X-	 * and we could thus just parse the script ourselves, exceptions here might 
+X-	 * have the same probability as services with different service and script 
+X-	 * names.
+X-	 * So we have to skip the first portion up to the "is not running" or "is 
+X-	 * runnind as pid" and assume service(8) returns the right script's output.
+X-	 */
+X-	if ((pinputp = strstr(pinput, " is not running.")) != NULL) {
+X-		return 1;
+X-	} else if ((pinputp = strstr(pinput, " is running as pid ")) == NULL) {
+X-		printlog(LOG_ERR, "Could not parse output from `service %s status`. Cause is either a non-standard rc script or (very unlikely) an incompatible rc.subr version.", svs->svname);
+X+	retcode = pclose(pp);
+X+
+X+	if (WEXITSTATUS(retcode)) {
+X 		return -1;
+X 	}
+X-	pinputp = pinputp + 19;
+X-
+X-	for (pinputp = strtok_r(pinputp, " .\n", &ttmpstr);
+X-			pinputp;
+X-			pinputp = strtok_r(NULL, " .\n", &ttmpstr)) {
+X-		svpid = malloc(sizeof(struct spid));
+X-		svpid->svpid = strtoul(pinputp, &tmpstr, 10);
+X-		if ((tmpstr && tmpstr[0]) || svpid->svpid <= 0) {
+X-			printlog(LOG_ERR, "Invalid output from rc.subr. Could not get all pids.");
+X-			free(svpid);
+X-			return -1;
+X-		}
+X-		SLIST_INSERT_HEAD(&svs->svpids, svpid, next);
+X-	}
+X 
+X 	return 0;
+X }
+X@@ -725,19 +737,38 @@ start_service(struct service *svs)
+X 	int ret;
+X 	int retcode;
+X 	char *cmdstr;
+X+	char pinput[LINE_MAX];
+X+	FILE *pp;
+X 
+X-	if (asprintf(&cmdstr, SERVICE " %s " RESTART, svs->svname) <= 0) {
+X+	if (asprintf(&cmdstr, SERVICE " %s " START, svs->svname) <= 0) {
+X 		if (strerror_r(errno, errorstr, sizeof errorstr))
+X 			printlog(LOG_ERR, "asprintf for executing %s failed: %s", svs->svname, errorstr);
+X 		else
+X 			printlog(LOG_ERR, "asprintf for executing %s failed.", svs->svname);
+X-		return 0;
+X+		return -1;
+X 	}
+X 
+X-	retcode = system(cmdstr);
+X+	pp = popen(cmdstr, "r");
+X 	free(cmdstr);
+X-	if (WEXITSTATUS(retcode))
+X+	if (pp == NULL) {
+X+		if (strerror_r(errno, errorstr, sizeof errorstr))
+X+			printlog(LOG_ERR, "popen failed: %s", svs->svname, errorstr);
+X+		else
+X+			printlog(LOG_ERR, "popen failed.", svs->svname);
+X 		return -1;
+X+	}
+X+
+X+	while (fgets(pinput, sizeof pinput, pp) != NULL) {
+X+		if (strstr(pinput, "_enable to YES in") != NULL) {
+X+			pclose(pp);
+X+			return 1;
+X+		}
+X+	}
+X+	retcode = pclose(pp);
+X+
+X+	if (WEXITSTATUS(retcode)) {
+X+		return -1;
+X+	}
+X 
+X 	/* Refresh our stored pid and re-register with kqueue. */
+X 	ret = -1;
+X@@ -785,15 +816,8 @@ kqueue_service(struct fscd_cfg *config, struct service *svs)
+X static int
+X register_service(struct fscd_cfg *config, struct service *svs)
+X {
+X-	char errorstr[LINE_MAX];
+X-
+X-	if (SLIST_EMPTY(&svs->svpids) && fill_pids(svs)) {
+X-		if (strerror_r(errno, errorstr, sizeof errorstr))
+X-			printlog(LOG_ERR, "Getting pids failed");
+X-		else
+X-			printlog(LOG_ERR, "Getting pids failed: %s", errorstr);
+X-		return -1;
+X-	}
+X+	if (SLIST_EMPTY(&svs->svpids))
+X+		fill_pids(svs);
+X 
+X 	if (kqueue_service(config, svs))
+X 		return -1;
+X@@ -823,6 +847,7 @@ unregister_service(struct fscd_cfg *config, char *svc_name_in)
+X 				free(svpid);
+X 			}
+X 			printlog(LOG_INFO, "%s has been removed.", svs->svname);
+X+			free(svs->svname);
+X 			free(svs);
+X 			ret = 0;
+X 			break;
+X@@ -869,10 +894,15 @@ readconf(struct fscd_cfg *config)
+X 				if (!svs) {
+X 					printlog(LOG_ERR, "%s could not be built a structure for.", svs->svname);
+X 					ret = -1;
+X-				} else if (register_service(config, svs)) {
+X-					printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
+X+				} else if ((ret=register_service(config, svs))) {
+X+					if (ret < 0)
+X+						printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
+X+					else
+X+						printlog(LOG_ERR, "%s could not be monitored. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
+X+					free(svs->svname);
+X 					free(svs);
+X-					ret = -1;
+X+				} else {
+X+					printlog(LOG_INFO, "%s is being monitored.", svs->svname);
+X 				}
+X 			}
+X 		} else {
+X@@ -886,16 +916,21 @@ readconf(struct fscd_cfg *config)
+X 				if (!svs) {
+X 					printlog(LOG_ERR, "%s could not be built a structure for.", svs->svname);
+X 					ret = -1;
+X-				} else if (start_service(svs)) {
+X-					printlog(LOG_ERR, "%s could not be started.", svs->svname);
+X-					free(svs);
+X-					ret = -1;
+X-				} else if (register_service(config, svs)) {
+X-					printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
+X+				} else if ((ret=register_service(config, svs))) {
+X+					if (ret < 0)
+X+						printlog(LOG_ERR, "%s could not be monitored.", svs->svname);
+X+					else
+X+						printlog(LOG_ERR, "%s could not be monitored. Set %s_enable to YES in %cetc/rc.conf.", svs->svname, svs->svname, '/');
+X+					free(svs->svname);
+X 					free(svs);
+X-					ret = -1;
+X+				} else if ((ret=handle_waiting(config, svs->svname))) {
+X+					printlog(LOG_ERR, "%s failed to wait for start.",
+X+							svs->svname);
+X+					printlog(LOG_ERR, "%s removed from monitoring.",
+X+							svs->svname);
+X+					unregister_service(config, svs->svname);
+X 				} else {
+X-					printlog(LOG_INFO, "%s started from config file.", svs->svname);
+X+					printlog(LOG_INFO, "Waiting for %s to start.", svs->svname);
+X 				}
+X 			}
+X 		}
+X@@ -920,6 +955,8 @@ connect_monitor(void *var)
+X 	char taskstr[LINE_MAX];
+X 	char errorstr[LINE_MAX];
+X 
+X+	printlog(LOG_INFO, "Server thread started.");
+X+
+X 	config = var;
+X 	memset(&local, 0, sizeof(local));
+X 	memset(&remote, 0, sizeof(remote));
+X@@ -1023,6 +1060,7 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
+X 	char *sendstr;
+X 	struct service *svs;
+X 	char eot = 4;
+X+	char status =0;
+X 
+X 	for (iter = arglst; (*iter = strsep(&serviceline, ":")) != NULL;) {
+X 		if (**iter != '\0')
+X@@ -1031,53 +1069,72 @@ handle_task(struct fscd_cfg *config, char *serviceline, int sock_fd)
+X 	}
+X 
+X 	pthread_mutex_lock(&config->service_mtx);
+X+
+X 	/* enable */
+X 	if (strcmp(arglst[0], "enable") == 0) {
+X 		if (service_registered(config, arglst[1])) {
+X 			asprintf(&sendstr, "Service already registered.\n");
+X+			status = 1;
+X 		} else {
+X 			svs = make_service(arglst[1]);
+X-			if (!svs)
+X+			if (!svs) {
+X 				asprintf(&sendstr, "Error building process structure.\n");
+X-			else if (!service_running(svs->svname) && start_service(svs))
+X+				status = 1;
+X+			} else if (!service_running(svs->svname) && start_service(svs)) {
+X 				asprintf(&sendstr, "Could not start service.\n");
+X-			else if (register_service(config, svs))
+X+				status = 1;
+X+			} else if (register_service(config, svs)) {
+X 				asprintf(&sendstr, "Could not monitor service.\n");
+X-			else
+X+				status = 1;
+X+			} else {
+X 				asprintf(&sendstr, "Monitoring service.\n");
+X+				status = 0;
+X+			}
+X 		}
+X+		send(sock_fd, &status, 1, 0);
+X+		send(sock_fd, sendstr, strlen(sendstr), 0);
+X+		send(sock_fd, &eot, 1, 0);
+X+		free(sendstr);
+X+		pthread_mutex_unlock(&config->service_mtx);
+X+		return 0;
+X+
+X 	/* disable */
+X 	} else if (strcmp(arglst[0], "disable") == 0) {
+X-		if (unregister_service(config, arglst[1]))
+X+		if (unregister_service(config, arglst[1])) {
+X 			asprintf(&sendstr, "Removing service failed: Not found.\n");
+X-		else
+X+			status = 1;
+X+		} else {
+X 			asprintf(&sendstr, "Service removed.\n");
+X+			status = 0;
+X+		}
+X+		send(sock_fd, &status, 1, 0);
+X+		send(sock_fd, sendstr, strlen(sendstr), 0);
+X+		send(sock_fd, &eot, 1, 0);
+X+		free(sendstr);
+X+		pthread_mutex_unlock(&config->service_mtx);
+X+		return 0;
+X+
+X 	/* shutdown */
+X 	} else if (strcmp(arglst[0], "shutdown") == 0) {
+X+		asprintf(&sendstr, "fscd shutting down.\n");
+X+		status = 0;
+X+		send(sock_fd, &status, 1, 0);
+X+		send(sock_fd, sendstr, strlen(sendstr), 0);
+X+		send(sock_fd, &eot, 1, 0);
+X+		free(sendstr);
+X 		pthread_mutex_unlock(&config->service_mtx); /* shutdown needs the lock. */
+X-		if (asprintf(&sendstr, "fscd shutting down.\n") <= 0) {
+X-			send(sock_fd, &eot, 1, 0);
+X-		} else {
+X-			send(sock_fd, sendstr, strlen(sendstr), 0);
+X-			send(sock_fd, &eot, 1, 0);
+X-		}
+X 		fscd_shutdown(config, 0);
+X+		return 0;
+X+
+X 	/* status */
+X 	} else if (strcmp(arglst[0], "status") == 0) {
+X 		print_status(config, sock_fd);
+X 		pthread_mutex_unlock(&config->service_mtx);
+X 		return 0;
+X-	} else {
+X-		pthread_mutex_unlock(&config->service_mtx);
+X-		return -1;
+X 	}
+X-	pthread_mutex_unlock(&config->service_mtx);
+X 
+X-	send(sock_fd, sendstr, strlen(sendstr), 0);
+X-	send(sock_fd, &eot, 4, 0);
+X-	if (sendstr)
+X-		free(sendstr);
+X-	return 0;
+X+	pthread_mutex_unlock(&config->service_mtx);
+X+	return -1;
+X }
+X 
+X /*
+X@@ -1094,8 +1151,7 @@ fscd_shutdown(struct fscd_cfg *config, int exitcode)
+X 	(void)unlink(socketname);
+X 
+X #if defined(__FreeBSD__)
+X-	struct pidfh *pfh;
+X-	if (pidfile_remove(pfh))
+X+	if (pfh && pidfile_remove(pfh))
+X 		err(1, "pidfile_remove");
+X #endif
+X 	exit(exitcode);
+X@@ -1103,7 +1159,7 @@ fscd_shutdown(struct fscd_cfg *config, int exitcode)
+X 
+X /*
+X  * Handle a signal.
+X- * XXX: Currently, there's no signal handling except for shutting down on the 
+X+ * XXX: Currently, there's no signal handling except for shutting down on the
+X  * registered signals. There might be some in the future.
+X  */
+X static void
+END-of-fsc/files/patch-fscd__fscd.c
+echo x - fsc/files/patch-rc.d_fscd
+sed 's/^X//' >fsc/files/patch-rc.d_fscd << 'END-of-fsc/files/patch-rc.d_fscd'
+Xdiff --git a/rc.d/fscd b/rc.d/fscd
+Xindex 1da5be3..afd5ee2 100755
+X--- rc.d/fscd
+X+++ rc.d/fscd
+X@@ -13,8 +13,19 @@
+X . /etc/rc.subr
+X 
+X name="fscd"
+X-command="/usr/sbin/${name}"
+X+rcvar="fscd_enable"
+X+load_rc_config $name
+X+: ${fscd_enable="NO"}
+X+
+X+command="/usr/local/sbin/${name}"
+X pidfile="/var/run/${name}.pid"
+X+required_files="/usr/local/etc/$name.conf"
+X+
+X+start_cmd=fscd_start
+X+
+X+fscd_start()
+X+{
+X+	/usr/sbin/daemon -cf ${command} ${fscd_flags}
+X+}
+X 
+X-load_rc_config $name
+X run_rc_command "$1"
+END-of-fsc/files/patch-rc.d_fscd
+echo x - fsc/Makefile
+sed 's/^X//' >fsc/Makefile << 'END-of-fsc/Makefile'
+X# Created by: Tom Rhodes <trhodes@FreeBSD.org>
+X# $FreeBSD: head/sysutils/fsc/Makefile 386312 2015-05-14 10:15:04Z mat $
+X
+XPORTNAME=	fsc
+XPORTVERSION=	1.0.1
+XPORTREVISION=	4
+XCATEGORIES=	sysutils
+XMASTER_SITES=	LOCAL/trhodes
+X
+XMAINTAINER=	trhodes@FreeBSD.org
+XCOMMENT=	The FreeBSD Services Control family of utilities
+X
+XWRKSRC=		${WRKDIR}/fsc
+X
+XPLIST_FILES=	bin/fscadm sbin/fscd etc/rc.d/fscd man/man5/fscd.conf.5.gz \
+X		man/man8/fscadm.8.gz man/man8/fscd.8.gz
+X
+Xpost-patch:
+X	@${REINPLACE_CMD} -e 's|/etc|${PREFIX}/etc|' \
+X		${WRKSRC}/fscd/fscd.8 ${WRKSRC}/fscd/fscd.c \
+X		${WRKSRC}/fscd/fscd.conf.5 ${WRKSRC}/fscadm/fscadm.c
+X
+Xdo-install:
+X	${INSTALL_PROGRAM} ${WRKSRC}/fscadm/fscadm ${STAGEDIR}${PREFIX}/bin
+X	${INSTALL_PROGRAM} ${WRKSRC}/fscd/fscd ${STAGEDIR}${PREFIX}/sbin
+X	${INSTALL_SCRIPT} ${WRKSRC}/rc.d/fscd ${STAGEDIR}${PREFIX}/etc/rc.d
+X	${INSTALL_DATA} ${WRKSRC}/fscd/fscd.conf.5.gz \
+X		${STAGEDIR}${MANPREFIX}/man/man5
+X	${INSTALL_DATA} ${WRKSRC}/fscd/fscd.8.gz \
+X		${STAGEDIR}${MANPREFIX}/man/man8
+X	${INSTALL_DATA} ${WRKSRC}/fscadm/fscadm.8.gz \
+X		${STAGEDIR}${MANPREFIX}/man/man8
+X
+X.include <bsd.port.mk>
+END-of-fsc/Makefile
+echo x - fsc/pkg-descr
+sed 's/^X//' >fsc/pkg-descr << 'END-of-fsc/pkg-descr'
+XThe FreeBSD Services Control software provides service
+Xmonitoring, restarting, and event logging for FreeBSD
+Xservers.  The core functionality is a daemon (fscd)
+Xwhich is interfaced with using fscadm.  See manual pages
+Xfor more information.
+END-of-fsc/pkg-descr
+exit
+
